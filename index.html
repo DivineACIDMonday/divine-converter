@@ -616,7 +616,7 @@ main {
 
   <!-- DROP ZONE -->
   <div class="drop-zone" id="drop-zone">
-    <input type="file" id="file-input" onchange="handleFile(this.files[0])" />
+    <input type="file" id="file-input" accept="video/*,audio/*,image/*,.pdf" onchange="handleFile(this.files[0])" />
     <div class="drop-icon">⬆</div>
     <h2>Drop your file here</h2>
     <p>Video · Audio · Image — any format</p>
@@ -812,7 +812,11 @@ const FORMAT_MAP = {
   },
   image: {
     accepts: ['jpg','jpeg','png','gif','webp','bmp','tiff','svg'],
-    outputs: ['jpg','png','webp','gif','bmp']
+    outputs: ['jpg','png','webp','gif','bmp','pdf']
+  },
+  pdf: {
+    accepts: ['pdf'],
+    outputs: ['jpg','png','docx-text']
   }
 };
 
@@ -967,6 +971,22 @@ async function startConvert() {
   document.getElementById('progress-pct').textContent = '0%';
   document.getElementById('progress-step').textContent = 'Reading your file…';
 
+  // PDF conversie — apart van ffmpeg
+  const inputExt = inputFile.name.split('.').pop().toLowerCase();
+  if (inputExt === 'pdf' || fmt === 'docx-text') {
+    await convertPDF(fmt);
+    btn.disabled = false;
+    document.getElementById('convert-btn-text').textContent = 'Convert';
+    return;
+  }
+  // Afbeelding naar PDF
+  if (fmt === 'pdf') {
+    await convertImageToPDF();
+    btn.disabled = false;
+    document.getElementById('convert-btn-text').textContent = 'Convert';
+    return;
+  }
+
   try {
     const inputName = 'input.' + inputFile.name.split('.').pop().toLowerCase();
     const outputName = 'output.' + fmt;
@@ -1041,6 +1061,99 @@ async function startConvert() {
   document.getElementById('convert-btn-text').textContent = 'Convert';
 }
 
+// ─── PDF CONVERSIE ────────────────────────────────────────────────────────────
+async function convertPDF(fmt) {
+  document.getElementById('progress-step').textContent = 'Loading PDF engine…';
+  // Laad pdf.js via CDN
+  if (!window.pdfjsLib) {
+    await loadScript('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js');
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+      'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  }
+  document.getElementById('progress-step').textContent = 'Reading PDF…';
+  const arrayBuffer = await inputFile.arrayBuffer();
+  const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const totalPages = pdf.numPages;
+  const blobs = [];
+
+  for (let i = 1; i <= totalPages; i++) {
+    document.getElementById('progress-step').textContent = `Rendering page ${i} of ${totalPages}…`;
+    document.getElementById('progress-fill').style.width = Math.round((i/totalPages)*90) + '%';
+    const page = await pdf.getPage(i);
+    const viewport = page.getViewport({ scale: 2 });
+    const canvas = document.createElement('canvas');
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    const ctx = canvas.getContext('2d');
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    const mimeOut = fmt === 'png' ? 'image/png' : 'image/jpeg';
+    const blob = await new Promise(res => canvas.toBlob(res, mimeOut, 0.92));
+    blobs.push(blob);
+  }
+
+  document.getElementById('progress-step').textContent = 'Done.';
+  document.getElementById('progress-fill').style.width = '100%';
+  document.getElementById('progress-pct').textContent = '100%';
+
+  if (blobs.length === 1) {
+    // Één pagina — direct downloaden
+    showResult(blobs[0], fmt, fmt);
+  } else {
+    // Meerdere pagina's — zip ze samen
+    document.getElementById('progress-step').textContent = 'Packaging pages…';
+    await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js');
+    const zip = new JSZip();
+    const baseName = inputFile.name.replace(/\.[^.]+$/, '');
+    blobs.forEach((blob, i) => {
+      zip.file(`${baseName}_page${i+1}.${fmt}`, blob);
+    });
+    const zipBlob = await zip.generateAsync({ type: 'blob' });
+    showResult(zipBlob, 'zip', 'zip');
+  }
+}
+
+async function convertImageToPDF() {
+  document.getElementById('progress-step').textContent = 'Converting image to PDF…';
+  // Gebruik jsPDF
+  await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
+  const reader = new FileReader();
+  const dataUrl = await new Promise(res => { reader.onload = e => res(e.target.result); reader.readAsDataURL(inputFile); });
+  const img = new Image();
+  await new Promise(res => { img.onload = res; img.src = dataUrl; });
+  const { jsPDF } = window.jspdf;
+  const orientation = img.width > img.height ? 'l' : 'p';
+  const pdf = new jsPDF({ orientation, unit: 'px', format: [img.width, img.height] });
+  pdf.addImage(dataUrl, 'JPEG', 0, 0, img.width, img.height);
+  const blob = pdf.output('blob');
+  document.getElementById('progress-fill').style.width = '100%';
+  document.getElementById('progress-pct').textContent = '100%';
+  document.getElementById('progress-step').textContent = 'Done.';
+  showResult(blob, 'pdf', 'pdf');
+}
+
+function showResult(blob, fmt, ext) {
+  if (outputUrl) URL.revokeObjectURL(outputUrl);
+  outputUrl = URL.createObjectURL(blob);
+  const baseName = inputFile.name.replace(/\.[^.]+$/, '');
+  const downloadBtn = document.getElementById('download-btn');
+  downloadBtn.href = outputUrl;
+  downloadBtn.download = baseName + '_converted.' + ext;
+  document.getElementById('result-meta').textContent =
+    `${baseName}_converted.${ext}  ·  ${formatBytes(blob.size)}  ·  ${fmt.toUpperCase()}`;
+  document.getElementById('result-box').classList.add('visible');
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = reject;
+    document.head.appendChild(s);
+  });
+}
+
 // ─── UTILS ────────────────────────────────────────────────────────────────────
 function getMimeType(fmt) {
   const map = {
@@ -1049,7 +1162,8 @@ function getMimeType(fmt) {
     mp3: 'audio/mpeg', wav: 'audio/wav', aac: 'audio/aac',
     flac: 'audio/flac', ogg: 'audio/ogg', m4a: 'audio/mp4',
     opus: 'audio/opus', jpg: 'image/jpeg', jpeg: 'image/jpeg',
-    png: 'image/png', webp: 'image/webp', gif: 'image/gif', bmp: 'image/bmp'
+    png: 'image/png', webp: 'image/webp', gif: 'image/gif', bmp: 'image/bmp',
+    pdf: 'application/pdf', zip: 'application/zip'
   };
   return map[fmt] || 'application/octet-stream';
 }
