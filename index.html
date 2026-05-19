@@ -730,32 +730,25 @@ main {
 
 <!-- COI Service Worker — fixes SharedArrayBuffer on GitHub Pages -->
 <script>
-if (typeof window !== "undefined") {
-  if (window.crossOriginIsolated === false && navigator.serviceWorker) {
-    const swCode = `
-      self.addEventListener("install", () => self.skipWaiting());
-      self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
-      self.addEventListener("fetch", (e) => {
-        if (e.request.cache === "only-if-cached" && e.request.mode !== "same-origin") return;
-        e.respondWith(
-          fetch(e.request).then((r) => {
-            if (r.status === 0) return r;
-            const h = new Headers(r.headers);
-            h.set("Cross-Origin-Embedder-Policy", "require-corp");
-            h.set("Cross-Origin-Opener-Policy", "same-origin");
-            return new Response(r.body, { status: r.status, statusText: r.statusText, headers: h });
-          }).catch(console.error)
-        );
+(async () => {
+  if (!window.crossOriginIsolated && 'serviceWorker' in navigator) {
+    // Registreer sw.js als echt bestand — blob URLs werken niet als SW
+    const reg = await navigator.serviceWorker.register('./sw.js');
+    // Wacht tot SW actief is, dan herlaad zodat de headers actief worden
+    if (!navigator.serviceWorker.controller) {
+      await new Promise(resolve => {
+        reg.addEventListener('updatefound', () => {
+          const sw = reg.installing;
+          sw.addEventListener('statechange', () => {
+            if (sw.state === 'activated') resolve();
+          });
+        });
+        if (reg.active) resolve();
       });
-    `;
-    const blob = new Blob([swCode], { type: 'application/javascript' });
-    const swUrl = URL.createObjectURL(blob);
-    navigator.serviceWorker.register(swUrl).then((reg) => {
-      reg.addEventListener("updatefound", () => window.location.reload());
-      if (reg.active) window.location.reload();
-    });
+      window.location.reload();
+    }
   }
-}
+})();
 </script>
 
 <!-- Load ffmpeg FIRST before any app code -->
